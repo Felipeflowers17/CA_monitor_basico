@@ -1,0 +1,56 @@
+[project]
+name = "ca-package"
+version = "1"
+description = "Paquete inicial prueba"
+authors = [
+    {name = "Felipeflowers17",email = "jdnicolas02@gmail.com"}
+]
+readme = "README.md"
+# package-mode = false  <--- BORRA LA LÍNEA DE AQUÍ
+requires-python = ">=3.13, <3.14"
+dependencies = [
+    "pyside6[uitools] (>=6.10.0,<7.0.0)",
+    "sqlalchemy (>=2.0.44,<3.0.0)",
+    "playwright (>=1.55.0,<2.0.0)",
+    "pandas (>=2.3.3,<3.0.0)",
+    "openpyxl (>=3.1.5,<4.0.0)",
+    "python-dotenv (>=1.2.1,<2.0.0)",
+    "pytest (>=8.4.2,<9.0.0)",
+    "alembic (>=1.17.1,<2.0.0)",
+    "pyside6-fluent-widgets (>=1.9.2,<2.0.0)",
+    "psycopg2-binary (>=2.9.11,<3.0.0)",
+    "requests (>=2.32.5,<3.0.0)",
+]
+
+# V---- AGREGA ESTA NUEVA SECCIÓN ----V
+[tool.poetry]
+package-mode = false
+# ^--- CON LA LÍNEA AQUÍ ---^
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "ruff (>=0.14.3,<0.15.0)",
+    "pyinstaller (>=6.16.0,<7.0.0)"
+]
+
+[tool.ruff]
+# Apunta a la versión de Python que estás usando
+# (basado en tu 'requires-python = ">=3.13"')
+target-version = "py313"
+
+# Directorio de tu código fuente
+src = ["src"]
+
+[tool.ruff.lint]
+# Habilita un conjunto de reglas estándar recomendadas
+# E/W = Errores/Warnings, F = Flake8, I = isort, UP = pyupgrade
+select = ["E", "F", "W", "I", "UP"]
+
+[tool.ruff.format]
+# Configuración de formato (similar a Black)
+quote-style = "double"
+line-ending = "auto"

@@ -1,0 +1,20 @@
+# --- Archivos de Python ---
+__pycache__/
+*.pyc
+
+# --- Entorno Virtual y Configuración Local ---
+.env
+.venv/
+poetry.lock
+
+# --- PyInstaller (El .exe y temporales) ---
+dist/
+build/
+*.spec
+
+# --- Logs y Datos Locales ---
+data/logs/
+*.log
+settings.json
+monitor_ca.db
+Monitor_Compras_Agiles_App/
