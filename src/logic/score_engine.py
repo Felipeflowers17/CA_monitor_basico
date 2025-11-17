@@ -2,6 +2,9 @@
 """
 Motor de Puntuación (Score Engine)
 
+(Versión 10.1 - Limpia)
+- Eliminada la depuración por consola (prints).
+- Mantiene la lógica dinámica de Keywords y Organismos.
 """
 
 from src.utils.logger import configurar_logger
@@ -12,10 +15,11 @@ from src.db.db_models import (
     CaOrganismo,
 )
 
-from config.config import UMBRAL_FASE_1
-from config.score_config import (
+# Importamos constantes desde config
+from config.config import (
+    UMBRAL_FASE_1,
     PUNTOS_SEGUNDO_LLAMADO,
-    PUNTOS_ALERTA_URGENCIA,
+    PUNTOS_ALERTA_URGENCIA
 )
 
 from typing import Dict, List, TYPE_CHECKING, Set, Optional
@@ -116,35 +120,38 @@ class ScoreEngine:
         """
         
         organismo_nombre_norm = self._normalizar_texto(licitacion_raw.get("organismo_comprador"))
-        
+        nombre_norm = self._normalizar_texto(licitacion_raw.get("nombre"))
+        estado_norm = self._normalizar_texto(licitacion_raw.get("estado_ca_texto"))
+
+        if not nombre_norm:
+            return 0
+
+        puntaje = 0
+
         organismo_id: Optional[int] = None
         if organismo_nombre_norm:
             organismo_id = self.organismo_name_to_id_map.get(organismo_nombre_norm)
 
+        # 1. Filtro No Deseado (Mata-todo)
         if organismo_id is not None and organismo_id in self.reglas_no_deseadas:
-            logger.debug(f"Fase 1 SKIP (No Deseado): '{licitacion_raw.get('nombre')}' | Org: {organismo_nombre_norm}")
             return -9999
         
-        puntaje = 0
-        
-        nombre_norm = self._normalizar_texto(licitacion_raw.get("nombre"))
-        estado_norm = self._normalizar_texto(licitacion_raw.get("estado_ca_texto"))
-        
-        if not nombre_norm:
-            return 0
-
+        # 2. Organismo Prioritario
         if organismo_id is not None and organismo_id in self.reglas_prioritarias:
             puntaje += self.reglas_prioritarias[organismo_id]
             
+        # 3. Reglas Hardcodeadas (Estado)
         if "segundo llamado" in estado_norm:
             puntaje += PUNTOS_SEGUNDO_LLAMADO
         if "alerta urgencia" in estado_norm:
             puntaje += PUNTOS_ALERTA_URGENCIA
             
+        # 4. Keywords en Título (Positivas)
         for kw_obj in self.reglas_keywords.get('titulo_pos', []):
             if kw_obj.keyword in nombre_norm:
                 puntaje += kw_obj.puntos
                 
+        # 5. Keywords en Título (Negativas)
         for kw_obj in self.reglas_keywords.get('titulo_neg', []):
             if kw_obj.keyword in nombre_norm:
                 puntaje += kw_obj.puntos
@@ -152,7 +159,7 @@ class ScoreEngine:
         puntaje_final = max(0, puntaje)
         
         if puntaje_final >= UMBRAL_FASE_1:
-            logger.debug(f"Fase 1 OK (Dinámico): '{nombre_norm}' | Score: {puntaje_final}")
+            logger.debug(f"Fase 1 OK: '{nombre_norm}' | Score: {puntaje_final}")
         
         return puntaje_final
 
@@ -195,6 +202,4 @@ class ScoreEngine:
                     puntaje += kw_obj.puntos
         
         logger.debug(f"Fase 2 | Desc: '{descripcion_norm[:50]}...', Prod: '{texto_productos[:50]}...' | Score: {puntaje}")
-        # El puntaje de Fase 2 SÍ puede ser negativo si encuentra muchas keywords negativas.
-        # El puntaje final se suma al de Fase 1 en el EtlService.
         return puntaje

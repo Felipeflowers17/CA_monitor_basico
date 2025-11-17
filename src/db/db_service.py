@@ -2,7 +2,9 @@
 """
 Servicio de Base de Datos (DbService).
 
-
+(Versión 10.0 - Recálculo Total Real)
+- Se modificó 'obtener_todas_candidatas_fase_1_para_recalculo' para que
+  traiga TODAS las licitaciones, no solo las que faltan por procesar.
 """
 
 from typing import List, Dict, Callable, Tuple, Optional
@@ -31,6 +33,8 @@ class DbService:
         self.session_factory = session_factory
         logger.info("DbService inicializado.")
 
+    # --- 1. Métodos de Lógica ELT (Usados por EtlService) ---
+
     def _get_or_create_organismo_sector(
         self, session: Session, nombre_organismo: str, nombre_sector: str
     ) -> CaOrganismo:
@@ -41,7 +45,7 @@ class DbService:
         stmt_sector = select(CaSector).where(CaSector.nombre == nombre_sector_norm)
         sector = session.scalars(stmt_sector).first()
         if not sector:
-            logger.info(f"Creando nuevo Sector: {nombre_sector_norm}")
+            logger.debug(f"Creando nuevo Sector: {nombre_sector_norm}")
             sector = CaSector(nombre=nombre_sector_norm)
             session.add(sector)
             session.flush()
@@ -50,7 +54,7 @@ class DbService:
         stmt_org = select(CaOrganismo).where(CaOrganismo.nombre == nombre_organismo_norm)
         organismo = session.scalars(stmt_org).first()
         if not organismo:
-            logger.info(f"Creando nuevo Organismo: {nombre_organismo_norm} (Sector: {sector.nombre})")
+            logger.debug(f"Creando nuevo Organismo: {nombre_organismo_norm}")
             organismo = CaOrganismo(nombre=nombre_organismo_norm, sector_id=sector.sector_id)
             session.add(organismo)
             session.flush()
@@ -109,6 +113,7 @@ class DbService:
                 logger.info(f"Procesadas {len(codigos_procesados)} CAs únicas.")
 
     def obtener_candidatas_para_recalculo_fase_1(self) -> List[CaLicitacion]:
+        """Obtiene solo CAs que faltan por procesar (Fase 1)."""
         with self.session_factory() as session:
             stmt = select(CaLicitacion).where(
                 CaLicitacion.puntuacion_final == 0,
@@ -119,19 +124,24 @@ class DbService:
             )
             return session.scalars(stmt).all()
 
+    # --- ¡MÉTODO CORREGIDO! ---
     def obtener_todas_candidatas_fase_1_para_recalculo(self) -> List[CaLicitacion]:
+        """
+        Obtiene TODAS las CAs activas para forzar un recálculo total.
+        YA NO FILTRA POR 'descripcion IS NULL'.
+        """
         with self.session_factory() as session:
-            stmt = select(CaLicitacion).where(
-                CaLicitacion.descripcion.is_(None)
-            ).options(
+            # Quitamos el filtro .where(CaLicitacion.descripcion.is_(None))
+            # para que revise todo.
+            stmt = select(CaLicitacion).options(
                 joinedload(CaLicitacion.organismo),
                 joinedload(CaLicitacion.seguimiento)
             )
             return session.scalars(stmt).all()
+    # --------------------------
     
     def actualizar_puntajes_fase_1_en_lote(self, actualizaciones: List[Tuple[int, int]]):
         if not actualizaciones:
-            logger.info("No hay puntajes para actualizar.")
             return
         with self.session_factory() as session:
             try:
@@ -143,7 +153,6 @@ class DbService:
                     ]
                 )
                 session.commit()
-                logger.info(f"Actualizados {len(actualizaciones)} puntajes de Fase 1.")
             except Exception as e:
                 logger.error(f"Error en la actualización de puntajes en lote: {e}")
                 session.rollback()
@@ -163,15 +172,9 @@ class DbService:
             logger.info(f"Se encontraron {len(candidatas)} CAs para procesar en Fase 2.")
             return candidatas
 
-
     def actualizar_ca_con_fase_2(
         self, codigo_ca: str, datos_fase_2: Dict, puntuacion_total: int
     ):
-        """
-        Actualiza una CA con los datos detallados de Fase 2.
-        Esto incluye la descripción, productos Y TAMBIÉN el estado
-        y proveedores (que pueden haber cambiado desde Fase 1).
-        """
         with self.session_factory() as session:
             try:
                 stmt = select(CaLicitacion).where(CaLicitacion.codigo_ca == codigo_ca)
@@ -181,23 +184,13 @@ class DbService:
                     logger.error(f"[Fase 2] No se encontró CA {codigo_ca} para actualizar.")
                     return
 
-                # Campos principales de Fase 2
                 licitacion.descripcion = datos_fase_2.get("descripcion")
                 licitacion.productos_solicitados = datos_fase_2.get("productos_solicitados")
                 licitacion.direccion_entrega = datos_fase_2.get("direccion_entrega")
                 licitacion.puntuacion_final = puntuacion_total
                 licitacion.fecha_cierre_segundo_llamado = datos_fase_2.get("fecha_cierre_p2")
-
-                # Actualiza también los datos de Fase 1, ya que pueden haber cambiado
-                # y ser más precisos en la ficha detallada.
-                if datos_fase_2.get("estado"):
-                    licitacion.estado_ca_texto = datos_fase_2.get("estado")
-                
-                if datos_fase_2.get("cantidad_provedores_cotizando") is not None:
-                    licitacion.proveedores_cotizando = datos_fase_2.get("cantidad_provedores_cotizando")
                 
                 session.commit()
-                logger.debug(f"[Fase 2] CA {codigo_ca} actualizada. Score: {puntuacion_total}")
             except Exception as e:
                 logger.error(f"[Fase 2] Error al actualizar CA {codigo_ca}: {e}")
                 session.rollback()
@@ -264,6 +257,7 @@ class DbService:
             return session.scalars(stmt).all()
 
     # --- 3. Métodos de Acción para la GUI (Menú Contextual) ---
+
     def _gestionar_seguimiento(self, ca_id: int, es_favorito: bool | None, es_ofertada: bool | None):
         with self.session_factory() as session:
             try:
@@ -311,6 +305,7 @@ class DbService:
                 raise
 
     # --- 4. Métodos de Gestión de Reglas (para la GUI de Configuración) ---
+    
     def get_all_keywords(self) -> List[CaKeyword]:
         with self.session_factory() as session:
             return session.scalars(select(CaKeyword).order_by(CaKeyword.tipo, CaKeyword.keyword)).all()
@@ -323,7 +318,6 @@ class DbService:
                 )
                 session.add(nueva_keyword)
                 session.commit()
-                logger.info(f"Keyword añadida: {nueva_keyword}")
                 session.refresh(nueva_keyword) 
                 return nueva_keyword
             except Exception as e:
@@ -338,7 +332,6 @@ class DbService:
                 if keyword:
                     session.delete(keyword)
                     session.commit()
-                    logger.info(f"Keyword eliminada: (ID: {keyword_id})")
                 else:
                     logger.warning(f"No se encontró keyword con ID {keyword_id} para eliminar.")
             except Exception as e:
@@ -359,67 +352,47 @@ class DbService:
     def set_organismo_regla(
         self, organismo_id: int, tipo: TipoReglaOrganismo, puntos: Optional[int] = None
     ) -> CaOrganismoRegla:
-        """
-        Crea o actualiza una regla para un organismo (Upsert).
-        Esto se usa para mover un organismo a 'Prioritario' o 'No Deseado'.
-        """
-        # Validación de lógica de negocio
         if tipo == TipoReglaOrganismo.NO_DESEADO:
-            puntos = None  # Nos aseguramos que 'no deseado' no tenga puntos
+            puntos = None
         elif tipo == TipoReglaOrganismo.PRIORITARIO and puntos is None:
-            logger.error(f"Intento de crear regla prioritaria SIN puntos para org {organismo_id}")
             raise ValueError("Reglas 'Prioritario' deben tener un valor de puntos.")
 
         with self.session_factory() as session:
             try:
-                # Buscar si ya existe una regla para este organismo
                 stmt = select(CaOrganismoRegla).where(
                     CaOrganismoRegla.organismo_id == organismo_id
                 )
                 regla = session.scalars(stmt).first()
 
                 if regla:
-                    # Actualizar regla existente
                     regla.tipo = tipo
                     regla.puntos = puntos
-                    logger.info(f"Regla actualizada para organismo ID {organismo_id} a {tipo.value}.")
                 else:
-                    # Crear nueva regla
                     regla = CaOrganismoRegla(
                         organismo_id=organismo_id, tipo=tipo, puntos=puntos
                     )
                     session.add(regla)
-                    logger.info(f"Nueva regla creada para organismo ID {organismo_id}: {tipo.value}.")
                 
                 session.commit()
                 session.refresh(regla)
                 return regla
-            
             except Exception as e:
                 logger.error(f"Error en set_organismo_regla para ID {organismo_id}: {e}")
                 session.rollback()
                 raise e
-            
 
     def delete_organismo_regla(self, organismo_id: int):
-        """
-        Elimina una regla de organismo (por organismo_id).
-        Esto se usa para mover un organismo a 'No Prioritario' (estado por defecto).
-        """
         with self.session_factory() as session:
             try:
-                # Buscar la regla por organismo_id
                 stmt = select(CaOrganismoRegla).where(
                     CaOrganismoRegla.organismo_id == organismo_id
                 )
                 regla = session.scalars(stmt).first()
-                
                 if regla:
                     session.delete(regla)
                     session.commit()
-                    logger.info(f"Regla eliminada para organismo ID {organismo_id}.")
                 else:
-                    logger.warning(f"No se encontró regla para organismo ID {organismo_id} (no se pudo eliminar).")
+                    logger.warning(f"No se encontró regla para organismo ID {organismo_id}.")
             except Exception as e:
                 logger.error(f"Error al eliminar regla para organismo ID {organismo_id}: {e}")
                 session.rollback()
