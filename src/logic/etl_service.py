@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import time
 import json
 from datetime import datetime
@@ -101,7 +102,6 @@ class EtlService:
                 'date_from': date_from.strftime('%Y-%m-%d'),
                 'date_to': date_to.strftime('%Y-%m-%d')
             }
-            # --- ¡CORRECCIÓN AQUÍ! Llamamos a run_scraper_listado ---
             datos_crudos = self.scraper_service.run_scraper_listado(
                 emit_text, filtros_fase_1, max_paginas
             )
@@ -221,8 +221,6 @@ class EtlService:
             emit_percent(20)
             lista_para_actualizar = []
             for i, licitacion in enumerate(licitaciones_a_puntuar):
-                # Filtro de seguimiento comentado para forzar recálculo total
-                # if licitacion.seguimiento and ... continue 
                 item_raw = { 
                     'codigo': licitacion.codigo_ca,
                     'nombre': licitacion.nombre, 
@@ -253,23 +251,32 @@ class EtlService:
         emit_text, emit_percent = self._create_progress_emitters(
             progress_callback_text, progress_callback_percent
         )
+        
+        # --- CORRECCIÓN: Inicializar variables ANTES del try ---
+        exitosas = 0
+        total = 0
+        # -------------------------------------------------------
+
         try:
             emit_text("Obteniendo CAs de pestañas 2, 3 y 4...")
             cas_tab2 = self.db_service.obtener_datos_tab2_relevantes()
             cas_tab3 = self.db_service.obtener_datos_tab3_seguimiento()
             cas_tab4 = self.db_service.obtener_datos_tab4_ofertadas()
             emit_percent(10)
+            
             cas_a_procesar_map: Dict[int, "CaLicitacion"] = {}
             for cas_list in (cas_tab2, cas_tab3, cas_tab4):
                 for ca in cas_list:
                     cas_a_procesar_map[ca.ca_id] = ca
             cas_a_procesar = list(cas_a_procesar_map.values())
             total = len(cas_a_procesar)
+            
             if not cas_a_procesar:
                 logger.info("No se encontraron CAs para actualizar.")
                 emit_text("No hay CAs para actualizar.")
                 emit_percent(100)
                 return
+            
             logger.info(f"Se actualizarán {total} CAs.")
             emit_text(f"Iniciando Fase 2. {total} CAs por procesar...")
             emit_percent(20)
@@ -279,22 +286,26 @@ class EtlService:
                 context = browser.new_context( user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36', viewport={'width': 1920, 'height': 1080}, locale='es-CL' )
                 page = context.new_page()
                 page.set_extra_http_headers(HEADERS_API)
-                exitosas = 0
+                
                 for i, licitacion in enumerate(cas_a_procesar):
                     codigo_ca = licitacion.codigo_ca
                     percent = 20 + int(((i + 1) / total) * 75)
                     emit_percent(percent)
+                    
                     item_raw = { 'nombre': licitacion.nombre, 'estado_ca_texto': licitacion.estado_ca_texto, 'organismo_comprador': licitacion.organismo.nombre if licitacion.organismo else "" }
                     puntos_fase_1 = self.score_engine.calcular_puntuacion_fase_1(item_raw)
+                    
                     if puntos_fase_1 < 0:
                         logger.warning(f"Omitiendo actualización Fase 2 de {codigo_ca}, puntaje Fase 1 es negativo ({puntos_fase_1}).")
                         continue
+                        
                     emit_text(f"({i+1}/{total}) Actualizando: {codigo_ca}...")
                     logger.info(f"--- [Actualización Fase 2] Procesando {i+1}/{total}: {codigo_ca} ---")
                     
                     datos_ficha = self.scraper_service.scrape_ficha_detalle_api(
                         page, codigo_ca, emit_text
                     )
+                    
                     if datos_ficha is None:
                         logger.error(f"No se pudieron obtener datos de Fase 2 para {codigo_ca}.")
                         continue
@@ -394,3 +405,18 @@ class EtlService:
                 raise e
             else:
                 raise ScraperHealthError(f"Fallo inesperado en el chequeo: {e}") from e
+    
+    def run_limpieza_automatica(self):
+        """
+        Ejecuta la limpieza de registros antiguos como una tarea de mantenimiento.
+        No emite progreso visual detallado, solo logs.
+        """
+        logger.info("Iniciando tarea de mantenimiento: Limpieza automática de BD...")
+        try:
+            cantidad = self.db_service.limpiar_registros_antiguos(dias_retencion=30)
+            if cantidad > 0:
+                logger.info(f"Mantenimiento completado: {cantidad} registros eliminados.")
+            else:
+                logger.info("Mantenimiento completado: Base de datos optimizada (nada que borrar).")
+        except Exception as e:
+            logger.warning(f"Advertencia: Falló la limpieza automática: {e}")

@@ -1,20 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-Ventana Principal de la Aplicación (MainWindow).
-
-
+Ventana Principal de la Aplicación (Modernizada con Fluent Widgets).
 """
 
 import sys
 from typing import List
 
+from PySide6.QtCore import QThreadPool, QTimer, Qt, Slot, QSize
+from PySide6.QtGui import QAction, QStandardItemModel, QIcon, QColor
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QTabWidget, QPushButton, QStatusBar, QTableView, QLineEdit,
-    QMenu, QMessageBox, QSystemTrayIcon, QStyle, QProgressBar 
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+    QTableView, QLineEdit, QFrame, QHeaderView, QSystemTrayIcon, QMenu, QStyle
 )
-from PySide6.QtCore import QThreadPool, QTimer
-from PySide6.QtGui import QAction, QStandardItemModel, QIcon 
+
+# --- IMPORTACIONES DE FLUENT WIDGETS ---
+from qfluentwidgets import (
+    FluentWindow, NavigationItemPosition, SubtitleLabel,
+    PrimaryPushButton, PushButton, FluentIcon as FIF,
+    setTheme, Theme, TableWidget, LineEdit,
+    MessageBox, InfoBar, InfoBarPosition, ProgressBar,
+    CheckBox, SpinBox, BodyLabel
+)
+
 from src.gui.gui_worker import Worker
 from src.utils.logger import configurar_logger
 from src.utils.settings_manager import SettingsManager
@@ -24,172 +31,281 @@ from src.logic.etl_service import EtlService
 from src.logic.excel_service import ExcelService
 from src.logic.score_engine import ScoreEngine
 from src.scraper.scraper_service import ScraperService
+
+# Mixins
 from .mixins.threading_mixin import ThreadingMixin
 from .mixins.main_slots_mixin import MainSlotsMixin
 from .mixins.data_loader_mixin import DataLoaderMixin
 from .mixins.context_menu_mixin import ContextMenuMixin
-from .mixins.table_manager_mixin import TableManagerMixin
+from .mixins.table_manager_mixin import TableManagerMixin, COLUMN_HEADERS_SIMPLE, COLUMN_HEADERS_DETALLADA
 
 logger = configurar_logger(__name__)
 
-class MainWindow(
-    QMainWindow,
-    ThreadingMixin,
-    MainSlotsMixin,
-    DataLoaderMixin,
-    ContextMenuMixin,
-    TableManagerMixin
-):
+# --- CLASE AUXILIAR PARA LAS PESTAÑAS ---
+class TableInterface(QWidget):
+    """
+    Representa el contenido de una 'Pestaña'. 
+    Contiene la barra de búsqueda, FILTROS RÁPIDOS y la tabla.
+    """
+    def __init__(self, object_name, parent=None):
+        super().__init__(parent=parent)
+        self.setObjectName(object_name)
+        
+        self.vBoxLayout = QVBoxLayout(self)
+        self.vBoxLayout.setContentsMargins(20, 20, 20, 20) 
+        self.vBoxLayout.setSpacing(10)
+        
+        # 1. Barra de búsqueda moderna
+        self.searchBar = LineEdit()
+        self.searchBar.setPlaceholderText("Buscar por código, nombre u organismo...")
+        self.searchBar.setClearButtonEnabled(True)
+        self.vBoxLayout.addWidget(self.searchBar)
+
+        # 2. Barra de Filtros Rápidos
+        self.filterLayout = QHBoxLayout()
+        
+        # Checkbox Simple
+        self.chk2doLlamado = CheckBox("Solo 2° Llamado", self)
+        
+        # Filtro Días (Cierran Pronto)
+        self.lblDias = BodyLabel("Cierre en (días):", self)
+        self.spinDias = SpinBox(self)
+        self.spinDias.setRange(0, 30)
+        self.spinDias.setValue(0) # 0 = Desactivado
+        self.spinDias.setFixedWidth(140)
+        self.spinDias.setToolTip("0 = Sin filtro. 2 = Cierra hoy o mañana.")
+        
+        # Filtro Monto Mínimo
+        self.lblMonto = BodyLabel("Monto Min. ($):", self)
+        self.spinMonto = SpinBox(self)
+        self.spinMonto.setRange(0, 999999999) # Hasta 999 millones
+        self.spinMonto.setValue(0) # 0 = Desactivado
+        self.spinMonto.setSingleStep(100000) # Saltos de 100k
+        self.spinMonto.setFixedWidth(200)
+        
+        # Agregar al layout
+        self.filterLayout.addWidget(self.chk2doLlamado)
+        
+        self.filterLayout.addSpacing(20)
+        self.filterLayout.addWidget(self.lblDias)
+        self.filterLayout.addWidget(self.spinDias)
+        
+        self.filterLayout.addSpacing(20)
+        self.filterLayout.addWidget(self.lblMonto)
+        self.filterLayout.addWidget(self.spinMonto)
+        
+        self.filterLayout.addStretch(1) 
+        
+        self.vBoxLayout.addLayout(self.filterLayout)
+        
+        # 3. Contenedor para la tabla
+        self.tableContainer = QFrame()
+        self.tableLayout = QVBoxLayout(self.tableContainer)
+        self.tableLayout.setContentsMargins(0, 5, 0, 0)
+        
+        self.vBoxLayout.addWidget(self.tableContainer)
+
+
+class MainWindow(FluentWindow, ThreadingMixin, MainSlotsMixin, DataLoaderMixin, ContextMenuMixin, TableManagerMixin):
+    """
+    Ventana Principal estilo Windows 11.
+    """
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Monitor de Compras Ágiles (v3.0 Dinámico)")
-        self.setGeometry(100, 100, 1200, 700)
+        
+        # 1. Configuración Inicial
+        self.setWindowTitle("Monitor CA") # <-- Título actualizado
+        self.resize(1200, 800)
+        
+        # Bandera para controlar el cierre real vs minimizado
+        self.force_close = False 
+
+        # Inicializar Servicios
         self.thread_pool = QThreadPool.globalInstance()
         self.running_workers: List['Worker'] = []
         self.is_task_running = False
         self.last_error: Exception | None = None
         self.last_export_path: str | None = None
+        
         try:
             self.settings_manager = SettingsManager()
             self.db_service = DbService(SessionLocal)
             self.scraper_service = ScraperService()
             self.excel_service = ExcelService(self.db_service)
             self.score_engine = ScoreEngine(self.db_service) 
-            self.etl_service = EtlService(
-                self.db_service, self.scraper_service, self.score_engine
-            )
+            self.etl_service = EtlService(self.db_service, self.scraper_service, self.score_engine)
         except Exception as e:
-            logger.critical(f"Error al inicializar los servicios: {e}")
-            QMessageBox.critical( self, "Error Crítico de Inicialización", f"No se pudieron iniciar los servicios de la aplicación.\nVerifique la configuración (.env) y la conexión a la BD.\n\nError: {e}",)
+            logger.critical(f"Error servicios: {e}")
             sys.exit(1)
-        # --- Declaraciones de atributos (para el type-checker) ---
-        self.refresh_button: QPushButton | None = None
-        self.actions_menu_button: QPushButton | None = None
-        self.action_update_fichas: QAction | None = None
-        self.action_health_check: QAction | None = None 
-        self.action_export_full_db: QAction | None = None
-        self.last_health_check_ok: bool = False      
-        self.table_tab1: QTableView | None = None
-        self.table_tab2: QTableView | None = None
-        self.table_tab3: QTableView | None = None
-        self.table_tab4: QTableView | None = None
-        self.model_tab1: QStandardItemModel | None = None
-        self.model_tab2: QStandardItemModel | None = None
-        self.model_tab3: QStandardItemModel | None = None
-        self.model_tab4: QStandardItemModel | None = None
-        self.search_tab1: QLineEdit | None = None
-        self.search_tab2: QLineEdit | None = None
-        self.search_tab3: QLineEdit | None = None
-        self.search_tab4: QLineEdit | None = None
+
+        # Variables de UI
         self.timer_fase1: QTimer | None = None
         self.timer_fase2: QTimer | None = None
+        self.progress_bar: ProgressBar | None = None
         self.tray_icon: QSystemTrayIcon | None = None
+
+        # 2. Crear Interfaces (Pestañas)
+        self.homeInterface = TableInterface("tab1_simple", self)
+        self.relevantesInterface = TableInterface("tab2_detallada", self)
+        self.seguimientoInterface = TableInterface("tab3_detallada", self)
+        self.ofertadasInterface = TableInterface("tab4_detallada", self)
         
-        self.progress_bar: QProgressBar | None = None
+        # Inicializar componentes de tabla
+        # Pestaña 1
+        self.model_tab1 = QStandardItemModel(0, len(COLUMN_HEADERS_SIMPLE))
+        self.model_tab1.setHorizontalHeaderLabels(COLUMN_HEADERS_SIMPLE)
+        self.table_tab1 = self.crear_tabla_view(self.model_tab1, "tab1_simple")
+        self.homeInterface.tableLayout.addWidget(self.table_tab1)
+        self.search_tab1 = self.homeInterface.searchBar 
+
+        # Pestaña 2
+        self.model_tab2 = QStandardItemModel(0, len(COLUMN_HEADERS_DETALLADA))
+        self.model_tab2.setHorizontalHeaderLabels(COLUMN_HEADERS_DETALLADA)
+        self.table_tab2 = self.crear_tabla_view(self.model_tab2, "tab2_detallada")
+        self.relevantesInterface.tableLayout.addWidget(self.table_tab2)
+        self.search_tab2 = self.relevantesInterface.searchBar
+
+        # Pestaña 3
+        self.model_tab3 = QStandardItemModel(0, len(COLUMN_HEADERS_DETALLADA))
+        self.model_tab3.setHorizontalHeaderLabels(COLUMN_HEADERS_DETALLADA)
+        self.table_tab3 = self.crear_tabla_view(self.model_tab3, "tab3_detallada")
+        self.seguimientoInterface.tableLayout.addWidget(self.table_tab3)
+        self.search_tab3 = self.seguimientoInterface.searchBar
+
+        # Pestaña 4
+        self.model_tab4 = QStandardItemModel(0, len(COLUMN_HEADERS_DETALLADA))
+        self.model_tab4.setHorizontalHeaderLabels(COLUMN_HEADERS_DETALLADA)
+        self.table_tab4 = self.crear_tabla_view(self.model_tab4, "tab4_detallada")
+        self.ofertadasInterface.tableLayout.addWidget(self.table_tab4)
+        self.search_tab4 = self.ofertadasInterface.searchBar
+
+        # 3. Configurar Navegación Lateral
+        self.initNavigation()
         
-        self._setup_ui()
+        self._setup_tray_icon() 
         self._connect_signals()
         self._setup_timers()
-        logger.info("Ventana principal (GUI) inicializada.")
-        self.on_load_data_thread() 
-
-    def _setup_ui(self):
-        central_widget = QWidget(self)
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        button_layout = QHBoxLayout()
-        self.refresh_button = QPushButton("Refrescar Datos")
-        self.refresh_button.setFixedHeight(40)
-        button_layout.addWidget(self.refresh_button)
-        button_layout.addStretch()
-        self.actions_menu_button = QPushButton("Acciones")
-        self.actions_menu_button.setFixedHeight(40)
-        self.actions_menu = QMenu(self)
-        self.action_scrape = QAction("Iniciar Nuevo Scraping...", self)
-        self.actions_menu.addAction(self.action_scrape)
-        self.action_update_fichas = QAction("Actualizar Fichas (Tabs 2-4)", self)
-        self.actions_menu.addAction(self.action_update_fichas)
         
+        # Cargar datos iniciales
+        QTimer.singleShot(500, self.on_load_data_thread)
+        QTimer.singleShot(3000, self.iniciar_limpieza_silenciosa)
 
-        self.action_export = QAction("Exportar Pestañas a Reporte...", self)
-        self.action_export.setToolTip("Exporta el contenido de las pestañas actuales a Excel o CSV.")
-        self.actions_menu.addAction(self.action_export)
-
+    def initNavigation(self):
+        """Configura el menú lateral izquierdo."""
         
-        self.actions_menu.addSeparator()
-        self.config_submenu = QMenu("Configuración y Diagnóstico", self) 
-        self.action_open_settings = QAction("Configuración y Automatización...", self)
-        self.config_submenu.addAction(self.action_open_settings)
-        self.action_recalculate = QAction("Recalcular Puntajes", self)
-        self.config_submenu.addAction(self.action_recalculate)
+        self.addSubInterface(self.homeInterface, FIF.HOME, "Candidatas", NavigationItemPosition.TOP)
+        self.addSubInterface(self.relevantesInterface, FIF.FILTER, "Relevantes", NavigationItemPosition.TOP)
+        self.addSubInterface(self.seguimientoInterface, FIF.HEART, "Seguimiento", NavigationItemPosition.TOP)
+        self.addSubInterface(self.ofertadasInterface, FIF.SHOPPING_CART, "Ofertadas", NavigationItemPosition.TOP)
         
-
-        self.config_submenu.addSeparator()
-        self.action_export_full_db = QAction("Exportar BD Completa a Excel...", self)
-        self.action_export_full_db.setToolTip("Exporta todas las tablas de la base de datos a un solo archivo Excel.")
-        self.config_submenu.addAction(self.action_export_full_db)
-        self.config_submenu.addSeparator()
-
+        self.navigationInterface.addSeparator()
         
-        self.action_health_check = QAction("Probar Conexión (Chequeo de Salud)...", self)
-        self.action_health_check.setToolTip("Ejecuta una prueba rápida para verificar la conexión y el formato de datos.")
-        self.config_submenu.addAction(self.action_health_check)
-        self.actions_menu.addMenu(self.config_submenu)
-        self.actions_menu_button.setMenu(self.actions_menu)
-        button_layout.addWidget(self.actions_menu_button)
-        main_layout.addLayout(button_layout)
-        self.tabs = QTabWidget()
-        main_layout.addWidget(self.tabs)
-        ( self.tab_candidatas, self.search_tab1, self.model_tab1, self.table_tab1, ) = self._crear_pestaña_tabla("Filtrar por Código, Nombre u Organismo...", "tab1_simple")
-        self.tabs.addTab(self.tab_candidatas, "CAs Candidatas (Fase 1)")
-        ( self.tab_relevantes, self.search_tab2, self.model_tab2, self.table_tab2, ) = self._crear_pestaña_tabla("Filtrar por Código, Nombre u Organismo...", "tab2_detallada")
-        self.tabs.addTab(self.tab_relevantes, "CAs Relevantes (Fase 2)")
-        ( self.tab_seguimiento, self.search_tab3, self.model_tab3, self.table_tab3, ) = self._crear_pestaña_tabla("Filtrar por Código, Nombre u Organismo...", "tab3_detallada")
-        self.tabs.addTab(self.tab_seguimiento, "CAs en Seguimiento (Favoritos)")
-        ( self.tab_ofertadas, self.search_tab4, self.model_tab4, self.table_tab4, ) = self._crear_pestaña_tabla("Filtrar por Código, Nombre u Organismo...", "tab4_detallada")
-        self.tabs.addTab(self.tab_ofertadas, "CAs Ofertadas")
-        self._setup_tray_icon()
+        self.navigationInterface.addItem(routeKey="scraping", icon=FIF.DOWNLOAD, text="Nuevo Scraping", onClick=self.on_open_scraping_dialog, position=NavigationItemPosition.SCROLL)
+        self.navigationInterface.addItem(routeKey="update", icon=FIF.SYNC, text="Actualizar Fichas", onClick=self.on_run_fase2_update_thread, position=NavigationItemPosition.SCROLL)
+        self.navigationInterface.addItem(routeKey="recalculate", icon=FIF.EDIT, text="Recalcular Puntajes", onClick=self.on_run_recalculate_thread, position=NavigationItemPosition.SCROLL)
+        self.navigationInterface.addItem(routeKey="refresh", icon=FIF.UPDATE, text="Refrescar Tablas", onClick=self.on_load_data_thread, position=NavigationItemPosition.SCROLL)
         
-        self.setStatusBar(QStatusBar(self))
-        self.progress_bar = QProgressBar(self)
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setFixedSize(200, 18)
-        self.statusBar().addPermanentWidget(self.progress_bar)
-        self.progress_bar.hide()
-        
-        self.statusBar().showMessage("Listo.")
+        self.navigationInterface.addItem(routeKey="settings", icon=FIF.SETTING, text="Configuración", onClick=self.on_open_settings_dialog, position=NavigationItemPosition.BOTTOM)
 
-
-    
     def _connect_signals(self):
-        self.refresh_button.clicked.connect(self.on_load_data_thread)
-        self.action_scrape.triggered.connect(self.on_open_scraping_dialog)
-        self.action_update_fichas.triggered.connect(self.on_run_fase2_update_thread)
+        # --- CONECTORES PESTAÑA 1 ---
+        self.homeInterface.searchBar.textChanged.connect(self.on_filters_changed_tab1)
+        self.homeInterface.chk2doLlamado.stateChanged.connect(self.on_filters_changed_tab1)
+        self.homeInterface.spinDias.valueChanged.connect(self.on_filters_changed_tab1)
+        self.homeInterface.spinMonto.valueChanged.connect(self.on_filters_changed_tab1)
         
-        self.action_export.triggered.connect(self.on_open_export_pestañas_dialog)
-        self.action_export_full_db.triggered.connect(self.on_export_full_db_thread)
+        # --- CONECTORES PESTAÑA 2 ---
+        self.relevantesInterface.searchBar.textChanged.connect(self.on_filters_changed_tab2)
+        self.relevantesInterface.chk2doLlamado.stateChanged.connect(self.on_filters_changed_tab2)
+        self.relevantesInterface.spinDias.valueChanged.connect(self.on_filters_changed_tab2)
+        self.relevantesInterface.spinMonto.valueChanged.connect(self.on_filters_changed_tab2)
         
-        self.action_open_settings.triggered.connect(self.on_open_settings_dialog)
-        self.action_recalculate.triggered.connect(self.on_run_recalculate_thread)
-        self.action_health_check.triggered.connect(self.on_run_health_check_thread)
-        self.search_tab1.textChanged.connect(self.on_search_tab1_changed)
-        self.search_tab2.textChanged.connect(self.on_search_tab2_changed)
-        self.search_tab3.textChanged.connect(self.on_search_tab3_changed)
-        self.search_tab4.textChanged.connect(self.on_search_tab4_changed)
+        # --- CONECTORES PESTAÑA 3 ---
+        self.seguimientoInterface.searchBar.textChanged.connect(self.on_filters_changed_tab3)
+        self.seguimientoInterface.chk2doLlamado.stateChanged.connect(self.on_filters_changed_tab3)
+        self.seguimientoInterface.spinDias.valueChanged.connect(self.on_filters_changed_tab3)
+        self.seguimientoInterface.spinMonto.valueChanged.connect(self.on_filters_changed_tab3)
+        
+        # --- CONECTORES PESTAÑA 4 ---
+        self.ofertadasInterface.searchBar.textChanged.connect(self.on_filters_changed_tab4)
+        self.ofertadasInterface.chk2doLlamado.stateChanged.connect(self.on_filters_changed_tab4)
+        self.ofertadasInterface.spinDias.valueChanged.connect(self.on_filters_changed_tab4)
+        self.ofertadasInterface.spinMonto.valueChanged.connect(self.on_filters_changed_tab4)
+        
+        # Menú contextual
         self.table_tab1.customContextMenuRequested.connect(self.mostrar_menu_contextual)
         self.table_tab2.customContextMenuRequested.connect(self.mostrar_menu_contextual)
         self.table_tab3.customContextMenuRequested.connect(self.mostrar_menu_contextual)
         self.table_tab4.customContextMenuRequested.connect(self.mostrar_menu_contextual)
-    
+
+    # --- SLOTS PARA FILTRADO COMBINADO ---
+    @Slot()
+    def on_filters_changed_tab1(self):
+        text = self.homeInterface.searchBar.text()
+        only_2nd = self.homeInterface.chk2doLlamado.isChecked()
+        days = self.homeInterface.spinDias.value()
+        amount = self.homeInterface.spinMonto.value()
+        self.filter_table_view(self.table_tab1, text, only_2nd, days, amount)
+
+    @Slot()
+    def on_filters_changed_tab2(self):
+        text = self.relevantesInterface.searchBar.text()
+        only_2nd = self.relevantesInterface.chk2doLlamado.isChecked()
+        days = self.relevantesInterface.spinDias.value()
+        amount = self.relevantesInterface.spinMonto.value()
+        self.filter_table_view(self.table_tab2, text, only_2nd, days, amount)
+
+    @Slot()
+    def on_filters_changed_tab3(self):
+        text = self.seguimientoInterface.searchBar.text()
+        only_2nd = self.seguimientoInterface.chk2doLlamado.isChecked()
+        days = self.seguimientoInterface.spinDias.value()
+        amount = self.seguimientoInterface.spinMonto.value()
+        self.filter_table_view(self.table_tab3, text, only_2nd, days, amount)
+
+    @Slot()
+    def on_filters_changed_tab4(self):
+        text = self.ofertadasInterface.searchBar.text()
+        only_2nd = self.ofertadasInterface.chk2doLlamado.isChecked()
+        days = self.ofertadasInterface.spinDias.value()
+        amount = self.ofertadasInterface.spinMonto.value()
+        self.filter_table_view(self.table_tab4, text, only_2nd, days, amount)
+
     def _setup_timers(self):
-        logger.info("Configurando timers de automatización...")
+        logger.info("Configurando timers...")
         self.timer_fase1 = QTimer(self)
         self.timer_fase1.timeout.connect(self.on_start_full_scraping_auto)
         self.timer_fase2 = QTimer(self)
         self.timer_fase2.timeout.connect(self.on_run_fase2_update_thread_auto)
         self.reload_timers_config()
+
+    def _show_task_completion_notification(self, title: str, message: str, is_auto: bool = False, is_error: bool = False):
+        if is_auto:
+            logger.info(f"AUTO NOTIFICACION: {title} - {message}")
+            return
+
+        pos = InfoBarPosition.TOP_RIGHT
+        if is_error:
+            InfoBar.error(title=title, content=message, orient=Qt.Horizontal, isClosable=True, position=pos, duration=5000, parent=self)
+        else:
+            InfoBar.success(title=title, content=message, orient=Qt.Horizontal, isClosable=True, position=pos, duration=3000, parent=self)
+
+    def set_ui_busy(self, busy: bool):
+        self.is_task_running = busy
+        if busy:
+            self.setCursor(Qt.WaitCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
+
+    @Slot()
+    def iniciar_limpieza_silenciosa(self):
+        if self.is_task_running: return
+        self.start_task(
+            task=self.etl_service.run_limpieza_automatica,
+            on_result=lambda: logger.debug("Fin de limpieza."),
+            on_error=lambda e: logger.warning(f"Error limpieza: {e}"),
+            on_finished=lambda: None
+        )
 
     def reload_timers_config(self):
         try:
@@ -198,49 +314,73 @@ class MainWindow(
             if intervalo_f1_horas > 0:
                 intervalo_ms = intervalo_f1_horas * 60 * 60 * 1000 
                 self.timer_fase1.start(intervalo_ms)
-                logger.info(f"Timer (Fase 1) iniciado. Se ejecutará cada {intervalo_f1_horas} horas.")
             else:
                 self.timer_fase1.stop()
-                logger.info("Timer (Fase 1) detenido (intervalo 0).")
             intervalo_f2_min = self.settings_manager.get_setting("auto_fase2_intervalo_minutos")
             if intervalo_f2_min > 0:
                 intervalo_ms = intervalo_f2_min * 60 * 1000 
                 self.timer_fase2.start(intervalo_ms)
-                logger.info(f"Timer (Fase 2) iniciado. Se ejecutará cada {intervalo_f2_min} minutos.")
             else:
                 self.timer_fase2.stop()
-                logger.info("Timer (Fase 2) detenido (intervalo 0).")
         except Exception as e:
-            logger.error(f"Error al configurar o (re)iniciar timers: {e}")
+            logger.error(f"Error timers: {e}")
             
     def _setup_tray_icon(self):
+        """Configura el icono de la bandeja del sistema."""
         icon = QIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
         self.tray_icon = QSystemTrayIcon(icon, self)
-        self.tray_icon.setToolTip("Monitor de Compras Ágiles")
-        tray_menu = QMenu(self)
+        self.tray_icon.setToolTip("Monitor CA")
+        
+        tray_menu = QMenu()
+        
+        restore_action = QAction("Abrir Monitor", self)
+        restore_action.triggered.connect(self.showNormal)
+        tray_menu.addAction(restore_action)
+        
+        tray_menu.addSeparator()
+        
+        # Acción para cerrar totalmente
         quit_action = QAction("Cerrar Aplicación", self)
-        quit_action.triggered.connect(QApplication.instance().quit)
+        quit_action.triggered.connect(self.force_quit) # <-- Conectamos a método personalizado
         tray_menu.addAction(quit_action)
+        
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.show()
-        logger.info("Ícono de bandeja del sistema (QSystemTrayIcon) inicializado.")
         
+        self.tray_icon.activated.connect(self._on_tray_icon_activated)
+        logger.info("Ícono de bandeja (Tray Icon) inicializado.")
+
+    @Slot()
+    def force_quit(self):
+        """Fuerza el cierre de la aplicación desde la bandeja."""
+        self.force_close = True
+        self.close() # Esto dispara closeEvent, que ahora permitirá el cierre
+        QApplication.instance().quit() # Asegura matar el proceso
+
+    def _on_tray_icon_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.showNormal()
+            self.activateWindow()
+
     def closeEvent(self, event):
-        event.ignore()
-        self.hide()
-        self.tray_icon.showMessage(
-            "Aplicación Minimizada",
-            "El monitor sigue ejecutándose en segundo plano. "
-            "Haz clic derecho en el ícono para cerrar.",
-            QSystemTrayIcon.MessageIcon.Information,
-            2000
-        )
+        """Sobrescribe el evento de cerrar para minimizar a la bandeja."""
+        if self.force_close:
+            event.accept() # Permite cerrar de verdad
+        else:
+            event.ignore() # Ignora el cierre real
+            self.hide() # Oculta la ventana
+            
+            self._show_task_completion_notification(
+                "Aplicación Minimizada",
+                "El monitor sigue ejecutándose en segundo plano.",
+                is_auto=False,
+                is_error=False
+            )
+
 
 def run_gui():
-    logger.info("Iniciando la aplicación Qt...")
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False) 
-    app.setStyle("Fusion")
+    app.setQuitOnLastWindowClosed(False)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

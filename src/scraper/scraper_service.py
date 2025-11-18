@@ -2,7 +2,9 @@
 """
 Servicio de Scraping (ScraperService).
 
-
+Modificaciones Fase 1:
+- scrape_ficha_detalle_api: Se añade la extracción del campo 'estado_convocatoria'
+  desde el payload de la API para asegurar que se guarde si la fase 1 falló al detectarlo.
 """
 
 import time
@@ -30,7 +32,7 @@ logger = configurar_logger('scraper_service')
 class ScraperService:
     
     def __init__(self):
-        logger.info("ScraperService inicializado (con lógica original).")
+        logger.info("ScraperService inicializado (con soporte para Segundo Llamado).")
 
     def _scrapear_pagina_listado(
         self, page: Page, numero_pagina: int, accion_trigger: Callable[[], None]
@@ -56,6 +58,9 @@ class ScraperService:
                 return False, {}, []
 
             metadata = api_handler.extraer_metadata_paginacion(datos_api)
+            
+            # IMPORTANTE: Asumimos que api_handler.extraer_resultados deja pasar
+            # el campo 'estado_convocatoria' si existe en el JSON original.
             resultados = api_handler.extraer_resultados(datos_api)
             
             logger.info(f"Página {numero_pagina} procesada: {len(resultados)} compras encontradas.")
@@ -230,7 +235,11 @@ class ScraperService:
                 'fecha_cierre_p2': payload.get('fecha_cierre_segundo_llamado'),
                 'productos_solicitados': payload.get('productos_solicitados', []),
                 'estado': payload.get('estado'), 
-                'cantidad_provedores_cotizando': payload.get('cantidad_provedores_cotizando') 
+                'cantidad_provedores_cotizando': payload.get('cantidad_provedores_cotizando'),
+                
+                # --- NUEVO: Intentamos extraer el estado de convocatoria de Fase 2 también ---
+                'estado_convocatoria': payload.get('estado_convocatoria')
+                # ---------------------------------------------------------------------------
             }
 
             

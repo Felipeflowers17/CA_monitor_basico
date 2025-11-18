@@ -2,14 +2,14 @@
 """
 Servicio de Base de Datos (DbService).
 
-(Versión 10.0 - Recálculo Total Real)
-- Se modificó 'obtener_todas_candidatas_fase_1_para_recalculo' para que
-  traiga TODAS las licitaciones, no solo las que faltan por procesar.
+Modificaciones Fase 3:
+- limpiar_registros_antiguos: Método para eliminar CAs viejas y no relevantes.
 """
 
 from typing import List, Dict, Callable, Tuple, Optional
+from datetime import datetime, timedelta 
 from sqlalchemy.orm import sessionmaker, Session, joinedload
-from sqlalchemy import select, join
+from sqlalchemy import select, join, delete, or_ 
 
 from .db_models import (
     Base,
@@ -61,6 +61,10 @@ class DbService:
         return organismo
 
     def insertar_o_actualizar_licitaciones_raw(self, compras: List[Dict]):
+        """
+        Inserta o actualiza licitaciones provenientes de la Fase 1 (Listado).
+        Se ha añadido la captura de 'estado_convocatoria' (1 o 2) para detectar segundo llamado.
+        """
         logger.info(f"Iniciando (ELT) Carga de {len(compras)} CAs crudas...")
         codigos_procesados = set()
         nuevos_inserts = 0
@@ -77,17 +81,27 @@ class DbService:
                         omitidos_duplicados += 1
                         continue
                     codigos_procesados.add(codigo)
+                    
                     nombre_org_raw = item.get("organismo", "No Especificado")
                     nombre_sec_raw = item.get("unidad", "No Especificado")
                     organismo_db = self._get_or_create_organismo_sector(
                         session, nombre_org_raw, nombre_sec_raw
                     )
+                    
                     stmt = select(CaLicitacion).where(CaLicitacion.codigo_ca == codigo)
                     licitacion_existente = session.scalars(stmt).first()
+                    
+                    # Extraemos el estado de convocatoria del item raw.
+                    estado_convocatoria_val = item.get("estado_convocatoria")
+                    
                     if licitacion_existente:
                         licitacion_existente.proveedores_cotizando = item.get("cantidad_provedores_cotizando")
                         licitacion_existente.estado_ca_texto = item.get("estado")
                         licitacion_existente.fecha_cierre = item.get("fecha_cierre")
+                        
+                        if estado_convocatoria_val is not None:
+                            licitacion_existente.estado_convocatoria = estado_convocatoria_val
+                            
                         actualizaciones += 1
                     else:
                         nueva_licitacion = CaLicitacion(
@@ -98,6 +112,7 @@ class DbService:
                             fecha_cierre=item.get("fecha_cierre"),
                             proveedores_cotizando=item.get("cantidad_provedores_cotizando"),
                             estado_ca_texto=item.get("estado"),
+                            estado_convocatoria=estado_convocatoria_val,
                             organismo_id=organismo_db.organismo_id,
                             puntuacion_final=0,
                         )
@@ -124,21 +139,16 @@ class DbService:
             )
             return session.scalars(stmt).all()
 
-    # --- ¡MÉTODO CORREGIDO! ---
     def obtener_todas_candidatas_fase_1_para_recalculo(self) -> List[CaLicitacion]:
         """
         Obtiene TODAS las CAs activas para forzar un recálculo total.
-        YA NO FILTRA POR 'descripcion IS NULL'.
         """
         with self.session_factory() as session:
-            # Quitamos el filtro .where(CaLicitacion.descripcion.is_(None))
-            # para que revise todo.
             stmt = select(CaLicitacion).options(
                 joinedload(CaLicitacion.organismo),
                 joinedload(CaLicitacion.seguimiento)
             )
             return session.scalars(stmt).all()
-    # --------------------------
     
     def actualizar_puntajes_fase_1_en_lote(self, actualizaciones: List[Tuple[int, int]]):
         if not actualizaciones:
@@ -190,11 +200,64 @@ class DbService:
                 licitacion.puntuacion_final = puntuacion_total
                 licitacion.fecha_cierre_segundo_llamado = datos_fase_2.get("fecha_cierre_p2")
                 
+                estado_conv_f2 = datos_fase_2.get("estado_convocatoria")
+                if estado_conv_f2 is not None:
+                     licitacion.estado_convocatoria = estado_conv_f2
+
                 session.commit()
             except Exception as e:
                 logger.error(f"[Fase 2] Error al actualizar CA {codigo_ca}: {e}")
                 session.rollback()
                 raise
+
+    # --- MÉTODOS DE MANTENIMIENTO (FASE 3) ---
+
+    def limpiar_registros_antiguos(self, dias_retencion: int = 30) -> int:
+        """
+        Elimina CAs de la base de datos que cumplan:
+        1. No sean 'Publicada' ni 'Publicada (Segundo llamado)'.
+        2. Fecha de cierre fue hace más de 'dias_retencion'.
+        3. NO estén marcadas como Favoritas por el usuario (Seguridad).
+        
+        Retorna: Cantidad de registros eliminados.
+        """
+        fecha_limite = datetime.now() - timedelta(days=dias_retencion)
+        registros_eliminados = 0
+        
+        with self.session_factory() as session:
+            try:
+                # 1. Identificar IDs que son favoritos para NO borrarlos
+                subquery_favoritos = select(CaSeguimiento.ca_id).where(CaSeguimiento.es_favorito == True)
+                
+                # 2. Construir la consulta de eliminación
+                stmt_delete = delete(CaLicitacion).where(
+                    # Condición de fecha: Cierre anterior al límite
+                    CaLicitacion.fecha_cierre < fecha_limite,
+                    
+                    # Condición de estado: No borrar si está publicada o es 2do llamado
+                    # Se usa NOT IN para texto y verificación del flag numérico
+                    CaLicitacion.estado_ca_texto.notin_(['Publicada', 'Publicada - Segundo llamado']),
+                    or_(CaLicitacion.estado_convocatoria.is_(None), CaLicitacion.estado_convocatoria != 2),
+                    
+                    # Condición de seguridad: No borrar si es favorito
+                    CaLicitacion.ca_id.notin_(subquery_favoritos)
+                )
+                
+                # Ejecutar la eliminación
+                result = session.execute(stmt_delete)
+                registros_eliminados = result.rowcount
+                session.commit()
+                
+                if registros_eliminados > 0:
+                    logger.info(f"Limpieza automática: Se eliminaron {registros_eliminados} CAs antiguas (> {dias_retencion} días).")
+                else:
+                    logger.debug("Limpieza automática: No se encontraron registros para eliminar.")
+                    
+            except Exception as e:
+                logger.error(f"Error durante la limpieza automática de BD: {e}")
+                session.rollback()
+                
+        return registros_eliminados
 
     # --- 2. Métodos de Lectura para la GUI (Refresco de Pestañas) ---
 
@@ -256,7 +319,7 @@ class DbService:
             )
             return session.scalars(stmt).all()
 
-    # --- 3. Métodos de Acción para la GUI (Menú Contextual) ---
+    # --- 3. Métodos de Acción para la GUI (Menú Contextual y Edición) ---
 
     def _gestionar_seguimiento(self, ca_id: int, es_favorito: bool | None, es_ofertada: bool | None):
         with self.session_factory() as session:
@@ -270,6 +333,7 @@ class DbService:
                         if es_ofertada: 
                             seguimiento.es_favorito = True
                 elif es_favorito or es_ofertada:
+                    # Si no existía registro de seguimiento, lo creamos
                     nuevo_seguimiento = CaSeguimiento(
                         ca_id=ca_id,
                         es_favorito=es_favorito or es_ofertada,
@@ -287,6 +351,27 @@ class DbService:
 
     def gestionar_ofertada(self, ca_id: int, es_ofertada: bool):
         self._gestionar_seguimiento(ca_id, es_favorito=None, es_ofertada=es_ofertada)
+
+    def actualizar_nota_seguimiento(self, ca_id: int, nueva_nota: str):
+        logger.debug(f"Actualizando nota para CA {ca_id}")
+        with self.session_factory() as session:
+            try:
+                seguimiento = session.get(CaSeguimiento, ca_id)
+                if seguimiento:
+                    seguimiento.notas = nueva_nota
+                else:
+                    nuevo_seguimiento = CaSeguimiento(
+                        ca_id=ca_id,
+                        es_favorito=False,
+                        es_ofertada=False,
+                        notas=nueva_nota
+                    )
+                    session.add(nuevo_seguimiento)
+                session.commit()
+            except Exception as e:
+                logger.error(f"Error al guardar nota para CA {ca_id}: {e}")
+                session.rollback()
+                raise
 
     def eliminar_ca_definitivamente(self, ca_id: int):
         logger.debug(f"GUI: Eliminación definitiva de CA ID: {ca_id}")
@@ -342,7 +427,6 @@ class DbService:
     # --- MÉTODOS DE ORGANISMO ---
 
     def get_all_organismo_reglas(self) -> List[CaOrganismoRegla]:
-        """Obtiene todas las reglas de organismo (Prioritarias y No Deseadas)."""
         with self.session_factory() as session:
             stmt = select(CaOrganismoRegla).options(
                 joinedload(CaOrganismoRegla.organismo)
@@ -399,6 +483,5 @@ class DbService:
                 raise e
     
     def get_all_organisms(self) -> List[CaOrganismo]:
-        """Obtiene TODOS los organismos de la BD (para la GUI de Configuración)."""
         with self.session_factory() as session:
             return session.scalars(select(CaOrganismo).order_by(CaOrganismo.nombre)).all()

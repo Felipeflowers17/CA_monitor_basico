@@ -1,19 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 Mixin para la lógica del Menú Contextual (clic derecho).
-
 """
 
 import webbrowser
-from PySide6.QtWidgets import QTableView, QMenu, QMessageBox
+from PySide6.QtWidgets import QTableView, QMenu, QMessageBox, QInputDialog
 from PySide6.QtGui import QCursor
-from PySide6.QtCore import Slot, QModelIndex
+from PySide6.QtCore import Slot, QModelIndex, Qt
 
 from src.utils.logger import configurar_logger
 from src.scraper.url_builder import construir_url_ficha
-
 from .table_manager_mixin import COLUMN_HEADERS_SIMPLE, COLUMN_HEADERS_DETALLADA
-
 
 logger = configurar_logger(__name__)
 
@@ -33,29 +30,39 @@ class ContextMenuMixin:
         model = active_table.model()
         row = index.row()
         
+        current_note = "" 
+        ca_id = None
+        codigo_ca = ""
+
         try:
-            # Determinamos en qué tipo de tabla estamos
-            num_columnas = model.columnCount()
+            # 1. Obtener el ID Interno (Ahora guardado oculto en la columna 0, UserRole)
+            # La columna 0 es "Score", usamos esa como ancla para los datos ocultos
+            item_score = model.item(row, 0)
+            ca_id_data = item_score.data(Qt.UserRole)
             
-            if num_columnas == len(COLUMN_HEADERS_SIMPLE):
-                # Estamos en la Pestaña 1 (Simple)
-                idx_id = COLUMN_HEADERS_SIMPLE.index("ID Interno")
-                idx_codigo = COLUMN_HEADERS_SIMPLE.index("Codigo CA") 
-            elif num_columnas == len(COLUMN_HEADERS_DETALLADA):
-                # Estamos en Pestañas 2, 3, o 4 (Detallada)
-                idx_id = COLUMN_HEADERS_DETALLADA.index("ID Interno")
-                idx_codigo = COLUMN_HEADERS_DETALLADA.index("Codigo CA") 
+            if ca_id_data:
+                ca_id = int(ca_id_data)
             else:
-                # Caso inesperado, no podemos continuar
-                logger.error(f"Error de menú contextual: número de columnas desconocido ({num_columnas})")
+                logger.error(f"No se encontró ID Interno en UserRole para fila {row}")
                 return
 
-            ca_id = int(model.item(row, idx_id).text())
+            # 2. Obtener Código CA
+            # Determinamos índice según la vista
+            if model.columnCount() == len(COLUMN_HEADERS_SIMPLE):
+                idx_codigo = COLUMN_HEADERS_SIMPLE.index("Codigo CA")
+            else:
+                idx_codigo = COLUMN_HEADERS_DETALLADA.index("Codigo CA")
+                # Intentamos obtener la nota actual si estamos en detallada
+                if "Notas" in COLUMN_HEADERS_DETALLADA:
+                    idx_notas = COLUMN_HEADERS_DETALLADA.index("Notas")
+                    item_nota = model.item(row, idx_notas)
+                    if item_nota:
+                        current_note = item_nota.text()
+            
             codigo_ca = model.item(row, idx_codigo).text()
 
-
         except Exception as e:
-            logger.error(f"Error al obtener ID de la fila {row}: {e}")
+            logger.error(f"Error al preparar menú contextual fila {row}: {e}", exc_info=True)
             return
             
         logger.debug(f"Menú contextual para CA ID: {ca_id} (Código: {codigo_ca})")
@@ -64,6 +71,10 @@ class ContextMenuMixin:
         menu.addAction("Marcar como Favorito").triggered.connect(lambda: self.on_marcar_favorito(ca_id))
         menu.addAction("Eliminar Seguimiento").triggered.connect(lambda: self.on_eliminar_seguimiento(ca_id))
         menu.addSeparator()
+        
+        menu.addAction("Editar Nota Personal...").triggered.connect(lambda: self.on_editar_nota_dialog(ca_id, current_note))
+        menu.addSeparator()
+        
         menu.addAction("Marcar como Ofertada").triggered.connect(lambda: self.on_marcar_ofertada(ca_id))
         menu.addAction("Quitar marca de Ofertada").triggered.connect(lambda: self.on_quitar_ofertada(ca_id))
         menu.addSeparator()
@@ -81,9 +92,20 @@ class ContextMenuMixin:
             task=task,
             on_result=lambda: logger.debug(f"Acción {task.__name__} OK"),
             on_error=self.on_task_error,
-            on_finished=self.on_load_data_thread,
+            on_finished=self.on_load_data_thread, 
             task_args=args,
         )
+    
+    @Slot(int, str)
+    def on_editar_nota_dialog(self, ca_id: int, current_note: str):
+        text, ok = QInputDialog.getMultiLineText(
+            self, 
+            "Nota Personal", 
+            "Escribe una nota para esta licitación:", 
+            current_note
+        )
+        if ok:
+            self._run_context_menu_action(self.db_service.actualizar_nota_seguimiento, ca_id, text)
 
     @Slot(int)
     def on_marcar_favorito(self, ca_id: int):

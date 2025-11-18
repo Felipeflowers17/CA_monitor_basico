@@ -2,6 +2,9 @@
 """
 Modelos de la Base de Datos (SQLAlchemy ORM).
 
+Se han agregado campos para soportar:
+1. Distinción de "Segundo Llamado" (estado_convocatoria).
+2. Notas personalizadas del usuario (notas).
 """
 
 import datetime
@@ -16,7 +19,8 @@ from sqlalchemy import (
     JSON,
     ForeignKey,
     Index,
-    Enum,  
+    Enum,
+    Text # Importamos Text para campos de notas largas
 )
 from typing import Optional, List
 
@@ -78,6 +82,15 @@ class CaLicitacion(Base):
 
     estado_ca_texto: Mapped[Optional[str]] = mapped_column(String(255))
     
+    # --- NUEVO CAMPO: Estado Convocatoria ---
+    # Almacena el código numérico que indica el tipo de llamado.
+    # 1 = Publicada (Primer llamado)
+    # 2 = Publicada (Segundo llamado)
+    estado_convocatoria: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, doc="1=Normal, 2=Segundo Llamado"
+    )
+    # ----------------------------------------
+    
     proveedores_cotizando: Mapped[Optional[int]] = mapped_column(Integer)
     descripcion: Mapped[Optional[str]] = mapped_column(String)
     direccion_entrega: Mapped[Optional[str]] = mapped_column(String(1000))
@@ -120,6 +133,14 @@ class CaSeguimiento(Base):
     es_ofertada: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, index=True
     )
+    
+    # --- NUEVO CAMPO: Notas de Usuario ---
+    # Permite al usuario guardar texto libre asociado a una licitación.
+    # Se usa Text para permitir descripciones largas.
+    notas: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, doc="Notas personalizadas del usuario"
+    )
+    # -------------------------------------
     
     licitacion: Mapped["CaLicitacion"] = relationship(
         back_populates="seguimiento"

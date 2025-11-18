@@ -1,57 +1,48 @@
 # -*- coding: utf-8 -*-
 """
-Diálogo para configurar las opciones de exportación.
+Diálogo de Exportación (Moderno).
 """
 
-from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QGroupBox, QRadioButton, 
-    QDialogButtonBox, QFormLayout
-)
 from PySide6.QtCore import Slot
+from qfluentwidgets import MessageBoxBase, SubtitleLabel, RadioButton, BodyLabel
 
-class GuiExportDialog(QDialog):
+class GuiExportDialog(MessageBoxBase):
     def __init__(self, current_tab_name: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Opciones de Exportación")
-        self.setMinimumWidth(350)
-        
         self.current_tab_name = current_tab_name
-
-        # Layout principal
-        layout = QVBoxLayout(self)
-
-        # Grupo de Formato
-        format_group = QGroupBox("Formato de Archivo")
-        format_layout = QVBoxLayout()
-        self.radio_excel = QRadioButton("Excel (.xlsx)")
-        self.radio_csv = QRadioButton("CSV (.csv)")
+        self.titleLabel = SubtitleLabel("Opciones de Exportación", self)
+        
+        # Widgets
+        self.lbl_format = BodyLabel("Formato de Archivo:", self)
+        self.radio_excel = RadioButton("Excel (.xlsx)", self)
+        self.radio_csv = RadioButton("CSV (.csv)", self)
         self.radio_excel.setChecked(True)
-        format_layout.addWidget(self.radio_excel)
-        format_layout.addWidget(self.radio_csv)
-        format_group.setLayout(format_layout)
-        layout.addWidget(format_group)
-
-        # Grupo de Alcance
-        scope_group = QGroupBox("Alcance de la Exportación")
-        scope_layout = QVBoxLayout()
-        self.radio_all_tabs = QRadioButton("Exportar todas las pestañas")
-        self.radio_current_tab = QRadioButton(f"Exportar solo pestaña actual ({current_tab_name})")
-        self.radio_all_tabs.setChecked(True)
-        scope_layout.addWidget(self.radio_all_tabs)
-        scope_layout.addWidget(self.radio_current_tab)
-        scope_group.setLayout(scope_layout)
-        layout.addWidget(scope_group)
-
-        # Botones de Aceptar/Cancelar
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
-
+        
+        self.lbl_scope = BodyLabel("Alcance:", self)
+        self.radio_all = RadioButton("Todas las pestañas", self)
+        self.radio_curr = RadioButton(f"Solo actual ({current_tab_name})", self)
+        self.radio_all.setChecked(True)
+        
+        # Layout
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addSpacing(10)
+        
+        self.viewLayout.addWidget(self.lbl_format)
+        self.viewLayout.addWidget(self.radio_excel)
+        self.viewLayout.addWidget(self.radio_csv)
+        
+        self.viewLayout.addSpacing(15)
+        
+        self.viewLayout.addWidget(self.lbl_scope)
+        self.viewLayout.addWidget(self.radio_all)
+        self.viewLayout.addWidget(self.radio_curr)
+        
+        self.yesButton.setText("Exportar")
+        self.cancelButton.setText("Cancelar")
+        
     def get_options(self) -> dict:
-        """Devuelve un diccionario con las opciones seleccionadas."""
         return {
             "format": "excel" if self.radio_excel.isChecked() else "csv",
-            "scope": "all" if self.radio_all_tabs.isChecked() else "current",
+            "scope": "all" if self.radio_all.isChecked() else "current",
             "tab_name": self.current_tab_name
         }

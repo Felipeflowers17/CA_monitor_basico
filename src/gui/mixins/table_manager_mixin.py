@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Mixin para la gestión de las Tablas (crear, poblar, filtrar).
-
 """
 
+from datetime import datetime, timedelta
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLineEdit, QTableView, 
     QAbstractItemView, QHeaderView
@@ -17,50 +17,29 @@ from src.db.db_models import CaLicitacion
 
 logger = configurar_logger(__name__)
 
-
+# Eliminamos ID Interno de la vista y agregamos Monto
 COLUMN_HEADERS_SIMPLE = [
-    "Score", "Codigo CA", "Nombre", "Organismo", "Direccion de entrega", 
-    "Estado", "Fecha publicacion", "Fecha cierre", "Proveedores cotizando", "ID Interno"
+    "Score", "Codigo CA", "Nombre", "Monto", "Organismo", "Direccion de entrega", 
+    "Estado", "Fecha publicacion", "Fecha cierre", "Proveedores cotizando"
 ]
+
 COLUMN_HEADERS_DETALLADA = [
-    "Score", "Codigo CA", "Nombre", "Descripcion", "Organismo", "Direccion de entrega", 
+    "Score", "Codigo CA", "Nombre", "Monto", "Descripcion", "Organismo", "Direccion de entrega", 
     "Estado", "Fecha publicacion", "Fecha cierre", "Fecha cierre segundo llamado", 
-    "Productos solicitados", "Proveedores cotizando", "ID Interno"
+    "Productos solicitados", "Proveedores cotizando", "Notas"
 ]
-
-
-
-COL_HEADERS_DET = COLUMN_HEADERS_DETALLADA
-COL_IDX_DET_CODIGO_CA = COL_HEADERS_DET.index("Codigo CA") 
-COL_IDX_DET_ID_INTERNO = COL_HEADERS_DET.index("ID Interno") 
-
-
-
 
 class TableManagerMixin:
     """
     Este Mixin maneja toda la lógica relacionada con las
     QTableView: creación de pestañas, poblado de datos
-    y filtrado de búsqueda.
+    y filtrado AVANZADO.
     """
 
+    # El método _crear_pestaña_tabla ya no se usa en la nueva GUI pero se deja por seguridad.
     def _crear_pestaña_tabla(self, placeholder: str, tab_id: str):
-        """Crea un widget de pestaña (Tab) con una barra y una tabla."""
         tab = QWidget()
-        layout = QVBoxLayout(tab)
-        
-        search_bar = QLineEdit()
-        search_bar.setPlaceholderText(placeholder)
-        layout.addWidget(search_bar)
-        
-        headers = COLUMN_HEADERS_SIMPLE if tab_id == "tab1_simple" else COLUMN_HEADERS_DETALLADA
-        model = QStandardItemModel(0, len(headers))
-        model.setHorizontalHeaderLabels(headers)
-        
-        table_view = self.crear_tabla_view(model, tab_id)
-        layout.addWidget(table_view)
-        
-        return tab, search_bar, model, table_view
+        return tab, None, None, None
 
     def crear_tabla_view(self, model: QStandardItemModel, tab_id: str) -> QTableView:
         """Configura las propiedades estándar de una QTableView."""
@@ -79,17 +58,19 @@ class TableManagerMixin:
         header = table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         
-
-        if tab_id == "tab1_simple":
-            header.setSectionResizeMode(COLUMN_HEADERS_SIMPLE.index("Nombre"), QHeaderView.ResizeMode.Stretch)
-            header.setSectionResizeMode(COLUMN_HEADERS_SIMPLE.index("Organismo"), QHeaderView.ResizeMode.Stretch)
-            table_view.setColumnHidden(COLUMN_HEADERS_SIMPLE.index("ID Interno"), True)
-        else:
-            header.setSectionResizeMode(COLUMN_HEADERS_DETALLADA.index("Nombre"), QHeaderView.ResizeMode.Stretch)
-            header.setSectionResizeMode(COLUMN_HEADERS_DETALLADA.index("Descripcion"), QHeaderView.ResizeMode.Stretch)
-            table_view.setColumnHidden(COLUMN_HEADERS_DETALLADA.index("ID Interno"), True)
-
+        # Ajustes de ancho
+        target_headers = COLUMN_HEADERS_SIMPLE if tab_id == "tab1_simple" else COLUMN_HEADERS_DETALLADA
         
+        if "Nombre" in target_headers:
+            header.setSectionResizeMode(target_headers.index("Nombre"), QHeaderView.ResizeMode.Stretch)
+        
+        if tab_id == "tab1_simple":
+            if "Organismo" in target_headers:
+                header.setSectionResizeMode(target_headers.index("Organismo"), QHeaderView.ResizeMode.Stretch)
+        else:
+            if "Descripcion" in target_headers:
+                header.setSectionResizeMode(target_headers.index("Descripcion"), QHeaderView.ResizeMode.Stretch)
+
         return table_view
 
     def poblar_tabla(self, model: QStandardItemModel, data: List[CaLicitacion]):
@@ -109,12 +90,18 @@ class TableManagerMixin:
             is_ofertada = licitacion.seguimiento and licitacion.seguimiento.es_ofertada
             is_favorito = licitacion.seguimiento and licitacion.seguimiento.es_favorito
 
-            nombre_organismo = "N/A"
-            if licitacion.organismo:
-                nombre_organismo = licitacion.organismo.nombre
-
+            # --- SCORE (y dato oculto ID) ---
             score_item = QStandardItem()
             score_item.setData(licitacion.puntuacion_final or 0, Qt.ItemDataRole.DisplayRole)
+            # IMPORTANTE: Guardamos el ID oculto aquí para el menú contextual
+            score_item.setData(licitacion.ca_id, Qt.UserRole)
+
+            # --- MONTO ---
+            monto_val = licitacion.monto_clp or 0
+            monto_str = f"$ {int(monto_val):,}".replace(",", ".") if monto_val else "N/A"
+            monto_item = QStandardItem(monto_str)
+            # Guardamos valor numérico real en UserRole para poder FILTRAR por número
+            monto_item.setData(monto_val, Qt.UserRole)
 
             prov_item = QStandardItem()
             prov_item.setData(licitacion.proveedores_cotizando or 0, Qt.ItemDataRole.DisplayRole)
@@ -123,6 +110,7 @@ class TableManagerMixin:
             if is_favorito or is_ofertada:
                 nombre_item.setFont(bold_font)
 
+            # Formato de Fechas
             try:
                 fecha_pub = licitacion.fecha_publicacion.strftime("%Y-%m-%d")
             except Exception:
@@ -132,18 +120,30 @@ class TableManagerMixin:
             except Exception:
                 fecha_cierre = "N/A"
 
+            # Visualización de Segundo Llamado
+            estado_str = licitacion.estado_ca_texto or "N/A"
+            if licitacion.estado_convocatoria == 2:
+                estado_str += " (2° Llamado)"
+            
+            # Notas
+            nota_str = ""
+            if licitacion.seguimiento and licitacion.seguimiento.notas:
+                nota_str = licitacion.seguimiento.notas
+            
+            nombre_organismo = licitacion.organismo.nombre if licitacion.organismo else "N/A"
+
             if is_simple_view:
                 row_items = [
-                    score_item,
+                    score_item, # 0. Score (contiene ID oculto)
                     QStandardItem(licitacion.codigo_ca),
                     nombre_item,
+                    monto_item, # Nueva columna Monto
                     QStandardItem(nombre_organismo),
                     QStandardItem(licitacion.direccion_entrega or "N/A"),
-                    QStandardItem(licitacion.estado_ca_texto or "N/A"),
+                    QStandardItem(estado_str),
                     QStandardItem(fecha_pub),
                     QStandardItem(fecha_cierre),
                     prov_item,
-                    QStandardItem(str(licitacion.ca_id)),
                 ]
             else:
                 try:
@@ -159,75 +159,115 @@ class TableManagerMixin:
                         productos_str = productos_str[:100] + "..."
 
                 row_items = [
-                    score_item,
+                    score_item, # 0. Score (contiene ID oculto)
                     QStandardItem(licitacion.codigo_ca),
                     nombre_item,
+                    monto_item, # Nueva columna Monto
                     QStandardItem(licitacion.descripcion or "N/A"),
                     QStandardItem(nombre_organismo),
                     QStandardItem(licitacion.direccion_entrega or "N/A"),
-                    QStandardItem(licitacion.estado_ca_texto or "N/A"),
+                    QStandardItem(estado_str),
                     QStandardItem(fecha_pub),
                     QStandardItem(fecha_cierre),
                     QStandardItem(fecha_cierre_2),
                     QStandardItem(productos_str),
                     prov_item,
-                    QStandardItem(str(licitacion.ca_id)),
+                    QStandardItem(nota_str),
                 ]
-
 
             model.appendRow(row_items)
 
-        active_table = self.sender()
+        # Ajuste de columnas post-poblado
+        active_table = self.sender() # type: ignore
         if isinstance(active_table, QTableView):
              header = active_table.horizontalHeader()
              header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
              if is_simple_view:
-                header.setSectionResizeMode(COLUMN_HEADERS_SIMPLE.index("Nombre"), QHeaderView.ResizeMode.Stretch)
-                header.setSectionResizeMode(COLUMN_HEADERS_SIMPLE.index("Organismo"), QHeaderView.ResizeMode.Stretch)
+                if "Nombre" in COLUMN_HEADERS_SIMPLE:
+                     header.setSectionResizeMode(COLUMN_HEADERS_SIMPLE.index("Nombre"), QHeaderView.ResizeMode.Stretch)
              else:
-                header.setSectionResizeMode(COLUMN_HEADERS_DETALLADA.index("Nombre"), QHeaderView.ResizeMode.Stretch)
-                header.setSectionResizeMode(COLUMN_HEADERS_DETALLADA.index("Descripcion"), QHeaderView.ResizeMode.Stretch)
+                if "Nombre" in COLUMN_HEADERS_DETALLADA:
+                     header.setSectionResizeMode(COLUMN_HEADERS_DETALLADA.index("Nombre"), QHeaderView.ResizeMode.Stretch)
 
 
-    def filter_table_view(self, table_view: QTableView, text: str):
-        """Filtra las filas de una tabla basado en el texto de búsqueda."""
+    def filter_table_view(self, table_view: QTableView, text: str, only_2nd: bool, days_limit: int, min_amount: int):
+        """
+        Filtra las filas de una tabla con múltiples criterios.
+        
+        Args:
+            table_view: La tabla a filtrar.
+            text: Texto de búsqueda.
+            only_2nd: Si True, solo muestra "2° Llamado".
+            days_limit: Número de días para considerar "Cierra Pronto".
+            min_amount: Monto mínimo en CLP.
+        """
         model = table_view.model()
+        if not model: return
+
         filter_text = text.lower()
         
-
         is_simple_view = (model.columnCount() == len(COLUMN_HEADERS_SIMPLE))
-        idx_codigo = COLUMN_HEADERS_SIMPLE.index("Codigo CA") if is_simple_view else COLUMN_HEADERS_DETALLADA.index("Codigo CA")
-        idx_nombre = COLUMN_HEADERS_SIMPLE.index("Nombre") if is_simple_view else COLUMN_HEADERS_DETALLADA.index("Nombre")
-        idx_org = COLUMN_HEADERS_SIMPLE.index("Organismo") if is_simple_view else COLUMN_HEADERS_DETALLADA.index("Organismo")
+        headers = COLUMN_HEADERS_SIMPLE if is_simple_view else COLUMN_HEADERS_DETALLADA
+        
+        # Índices de columnas
+        idx_codigo = headers.index("Codigo CA")
+        idx_nombre = headers.index("Nombre")
+        idx_org = headers.index("Organismo") if "Organismo" in headers else -1
+        idx_estado = headers.index("Estado")
+        idx_cierre = headers.index("Fecha cierre")
+        idx_monto = headers.index("Monto")
 
+        now = datetime.now()
 
         for row in range(model.rowCount()):
-            try:
-                codigo_ca = model.item(row, idx_codigo).text().lower()
-                nombre = model.item(row, idx_nombre).text().lower()
-                organismo = model.item(row, idx_org).text().lower()
-            except AttributeError:
-                continue
+            should_show = True
+            
+            # 1. Filtro de Texto
+            if filter_text:
+                try:
+                    codigo_ca = model.item(row, idx_codigo).text().lower()
+                    nombre = model.item(row, idx_nombre).text().lower()
+                    organismo = model.item(row, idx_org).text().lower() if idx_org != -1 else ""
+                    
+                    if (filter_text not in codigo_ca and 
+                        filter_text not in nombre and 
+                        filter_text not in organismo):
+                        should_show = False
+                except AttributeError:
+                    should_show = False
 
-            if (filter_text in codigo_ca or 
-                filter_text in nombre or 
-                filter_text in organismo):
-                table_view.setRowHidden(row, False)
-            else:
-                table_view.setRowHidden(row, True)
+            # 2. Filtro de 2do Llamado
+            if should_show and only_2nd:
+                estado_val = model.item(row, idx_estado).text()
+                if "2° Llamado" not in estado_val:
+                    should_show = False
+            
+            # 3. Filtro de Cierre Pronto (Días dinámicos)
+            if should_show and days_limit > 0:
+                fecha_str = model.item(row, idx_cierre).text()
+                if fecha_str == "N/A":
+                    should_show = False 
+                else:
+                    try:
+                        fecha_dt = datetime.strptime(fecha_str, "%Y-%m-%d %H:%M")
+                        delta = fecha_dt - now
+                        # Si ya pasó (cerrada) o falta más del límite -> Ocultar
+                        if delta.total_seconds() < 0 or delta.days >= days_limit:
+                             should_show = False
+                    except ValueError:
+                        should_show = False
+            
+            # 4. Filtro de Monto Mínimo
+            if should_show and min_amount > 0:
+                # Recuperamos el valor numérico puro del UserRole
+                try:
+                    item_monto = model.item(row, idx_monto)
+                    monto_val = item_monto.data(Qt.UserRole) # Recuperamos el float/int
+                    if monto_val is None: monto_val = 0
+                    if float(monto_val) < min_amount:
+                        should_show = False
+                except Exception:
+                    should_show = False
 
-    @Slot(str)
-    def on_search_tab1_changed(self, text: str):
-        self.filter_table_view(self.table_tab1, text)
-
-    @Slot(str)
-    def on_search_tab2_changed(self, text: str):
-        self.filter_table_view(self.table_tab2, text)
-
-    @Slot(str)
-    def on_search_tab3_changed(self, text: str):
-        self.filter_table_view(self.table_tab3, text)
-
-    @Slot(str)
-    def on_search_tab4_changed(self, text: str):
-        self.filter_table_view(self.table_tab4, text)
+            # APLICAR
+            table_view.setRowHidden(row, not should_show)

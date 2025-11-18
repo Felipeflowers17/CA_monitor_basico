@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Punto de Entrada Principal de la Aplicación.
+Punto de Entrada Principal de la Aplicación (Producción).
 """
 
 import sys
@@ -30,15 +30,12 @@ def run_migrations():
     """Ejecuta las migraciones de Alembic antes de iniciar la GUI."""
     logger.info("Verificando estado de la base de datos...")
     try:
-        # Rutas para el ejecutable congelado
+        # Rutas para el ejecutable congelado vs código fuente
         if getattr(sys, 'frozen', False):
-            # En el .exe, alembic.ini está en la raíz temporal (_MEI...)
-            # Y la carpeta alembic también.
             base_path = Path(sys._MEIPASS) # Ruta temporal de PyInstaller
             alembic_cfg_path = base_path / "alembic.ini"
             script_location = base_path / "alembic"
         else:
-            # En modo script
             alembic_cfg_path = BASE_DIR / "alembic.ini"
             script_location = BASE_DIR / "alembic"
 
@@ -52,19 +49,17 @@ def run_migrations():
         alembic_cfg.set_main_option("script_location", str(script_location))
         alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
 
-        # Ejecutar upgrade head
+        # Ejecutar upgrade head (silencioso si no hay cambios)
         upgrade(alembic_cfg, "head")
-        logger.info("¡Migraciones completadas con éxito!")
+        logger.info("BD actualizada correctamente.")
 
     except Exception as e:
+        # Si falla la migración, lo logueamos pero intentamos abrir la app igual
+        # para no bloquear al usuario por errores menores de DB.
         logger.critical(f"Error al ejecutar migraciones: {e}", exc_info=True)
 
 def main():
-    logger.info("=====================================")
-    logger.info("Iniciando Monitor de Compras Ágiles...")
-    logger.info("=====================================")
-
-    # 1. Ejecutar Migraciones (Bloqueante) para asegurar que la BD esté actualizada
+    # 1. Ejecutar Migraciones
     run_migrations()
 
     # 2. Iniciar GUI
@@ -72,8 +67,9 @@ def main():
         from src.gui.gui_main import run_gui
         run_gui()
     except Exception as e:
-        logger.critical(f"Error fatal en main: {e}", exc_info=True)
-        input("Presione ENTER para salir...")
+        logger.critical(f"Error fatal no manejado en la GUI: {e}", exc_info=True)
+        # En producción, si falla fatalmente, mostramos el error rápido antes de salir
+        print(f"Error Fatal: {e}")
 
 if __name__ == "__main__":
     main()
